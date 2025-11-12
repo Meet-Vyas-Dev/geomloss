@@ -1,23 +1,8 @@
 """Implements a comprehensive collection of distance metrics between point clouds.
 
-This module provides implementations for various distance metric families:
-- Lp (Minkowski) Distance Family
-- L1 Family  
-- Intersection Family
-- Inner Product Family
-- Squared-chord Family
-- Squared L2 (χ²) Family
-- Shannon's Entropy Family
-- Combination Family
-
-All distance functions follow the signature:
-    distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs)
-    
-where:
-    - x, y: point clouds (N,D) or (B,N,D) tensors
-    - blur: optional scale parameter for some metrics
-    - use_keops: whether to use KeOps for lazy evaluation
-    - ranges: optional KeOps reduction ranges for block-sparse operations
+Note: All distance-style functions return the positive distance D. 
+Similarity-style functions return a positive similarity S.
+The conversion to a kernel K = exp(-D/blur) is handled by the kernel_samples module.
 """
 
 import numpy as np
@@ -31,7 +16,7 @@ except:
 
 
 # ==============================================================================
-#                    Helper Functions for Distance Computation
+#                 Helper Functions for Distance Computation
 # ==============================================================================
 
 def _squared_distances(x, y, use_keops=False):
@@ -95,7 +80,7 @@ def _safe_log(x, eps=1e-8):
 
 
 # ==============================================================================
-#                    Lp (Minkowski) Distance Family
+#                     Lp (Minkowski) Distance Family
 # ==============================================================================
 
 def minkowski_distance(x, y, p=2, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -105,11 +90,11 @@ def minkowski_distance(x, y, p=2, blur=None, use_keops=False, ranges=None, **kwa
         p: Order of the norm (default=2 for Euclidean)
     """
     if p == 2:
-        return euclidean_distance(x, y, blur=blur, use_keops=use_keops, ranges=ranges)
+        return euclidean_distance(x, y, use_keops=use_keops, ranges=ranges)
     elif p == 1:
-        return manhattan_distance(x, y, blur=blur, use_keops=use_keops, ranges=ranges)
+        return manhattan_distance(x, y, use_keops=use_keops, ranges=ranges)
     elif np.isinf(p):
-        return chebyshev_distance(x, y, blur=blur, use_keops=use_keops, ranges=ranges)
+        return chebyshev_distance(x, y, use_keops=use_keops, ranges=ranges)
     
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
@@ -117,9 +102,7 @@ def minkowski_distance(x, y, p=2, blur=None, use_keops=False, ranges=None, **kwa
     else:
         D = torch.norm(x.unsqueeze(-2) - y.unsqueeze(-3), p=p, dim=-1)
     
-    if blur is not None:
-        D = D / blur
-    return -D  # Return negative for kernel convention
+    return D
 
 
 def manhattan_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -132,28 +115,19 @@ def manhattan_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     else:
         D = torch.sum(torch.abs(x.unsqueeze(-2) - y.unsqueeze(-3)), dim=-1)
     
-    if blur is not None:
-        D = D / blur
-    return -D
+    return D
 
 
 def euclidean_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     """L2 distance (Euclidean): sqrt(sum_i (x_i - y_i)^2)"""
     if use_keops and keops_available:
-        # For KeOps, compute squared distance and apply sqrt more carefully
-        D_sq = _squared_distances(x, y, use_keops=True)
-        if blur is not None:
-            # Apply blur before sqrt for numerical stability
-            D = (D_sq / (blur ** 2)).sqrt()
-        else:
-            D = D_sq.sqrt()
+        D = _squared_distances(x, y, use_keops=True).sqrt()
         if ranges is not None:
             D.ranges = ranges
     else:
         D = _distances(x, y, use_keops=False)
-        if blur is not None:
-            D = D / blur
-    return -D
+        
+    return D
 
 
 def chebyshev_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -164,15 +138,13 @@ def chebyshev_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     else:
         D = torch.max(torch.abs(x.unsqueeze(-2) - y.unsqueeze(-3)), dim=-1)[0]
     
-    if blur is not None:
-        D = D / blur
-    return -D
+    return D
 
 
 def weighted_minkowski_distance(x, y, weights=None, p=2, blur=None, use_keops=False, ranges=None, **kwargs):
     """Weighted Lp distance: (sum_i w_i * |x_i - y_i|^p)^(1/p)"""
     if weights is None:
-        return minkowski_distance(x, y, p=p, blur=blur, use_keops=use_keops, ranges=ranges)
+        return minkowski_distance(x, y, p=p, use_keops=use_keops, ranges=ranges)
     
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
@@ -182,13 +154,11 @@ def weighted_minkowski_distance(x, y, weights=None, p=2, blur=None, use_keops=Fa
         diff = x.unsqueeze(-2) - y.unsqueeze(-3)
         D = (weights * (torch.abs(diff) ** p)).sum(-1) ** (1.0 / p)
     
-    if blur is not None:
-        D = D / blur
-    return -D
+    return D
 
 
 # ==============================================================================
-#                            L1 Family
+#                                 L1 Family
 # ==============================================================================
 
 def sorensen_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -203,7 +173,7 @@ def sorensen_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
         denominator = torch.sum(x.unsqueeze(-2) + y.unsqueeze(-3), dim=-1)
         D = _safe_div(numerator, denominator)
     
-    return -D
+    return D
 
 
 def gower_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -215,7 +185,7 @@ def gower_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     else:
         D = torch.sum(torch.abs(x.unsqueeze(-2) - y.unsqueeze(-3)), dim=-1) / d
     
-    return -D
+    return D
 
 
 def soergel_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -230,7 +200,7 @@ def soergel_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
         denominator = torch.sum(torch.max(x.unsqueeze(-2), y.unsqueeze(-3)), dim=-1)
         D = _safe_div(numerator, denominator)
     
-    return -D
+    return D
 
 
 def kulczynski_d1_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -245,7 +215,7 @@ def kulczynski_d1_distance(x, y, blur=None, use_keops=False, ranges=None, **kwar
         denominator = torch.sum(torch.min(x.unsqueeze(-2), y.unsqueeze(-3)), dim=-1)
         D = _safe_div(numerator, denominator)
     
-    return -D
+    return D
 
 
 def canberra_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -260,7 +230,7 @@ def canberra_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
         denominator = torch.abs(x.unsqueeze(-2)) + torch.abs(y.unsqueeze(-3))
         D = torch.sum(_safe_div(numerator, denominator), dim=-1)
     
-    return -D
+    return D
 
 
 def lorentzian_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -271,11 +241,11 @@ def lorentzian_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs)
     else:
         D = torch.sum(_safe_log(torch.abs(x.unsqueeze(-2) - y.unsqueeze(-3)) + 1), dim=-1)
     
-    return -D
+    return D
 
 
 # ==============================================================================
-#                        Intersection Family
+#                             Intersection Family
 # ==============================================================================
 
 def intersection_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -290,7 +260,7 @@ def intersection_distance(x, y, blur=None, use_keops=False, ranges=None, **kwarg
         denominator = torch.sum(torch.max(x.unsqueeze(-2), y.unsqueeze(-3)), dim=-1)
         D = 1 - _safe_div(numerator, denominator)
     
-    return -D
+    return D
 
 
 def wave_hedges_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -305,7 +275,7 @@ def wave_hedges_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs
         max_val = torch.max(x.unsqueeze(-2), y.unsqueeze(-3))
         D = torch.sum(1 - _safe_div(min_val, max_val), dim=-1)
     
-    return -D
+    return D
 
 
 def czekanowski_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -320,7 +290,7 @@ def czekanowski_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwar
         denominator = torch.sum(x.unsqueeze(-2) + y.unsqueeze(-3), dim=-1)
         S = _safe_div(numerator, denominator)
     
-    return S  # Return positive for similarity
+    return S  # Returns similarity S
 
 
 def motyka_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -355,7 +325,7 @@ def kulczynski_s1_similarity(x, y, blur=None, use_keops=False, ranges=None, **kw
 
 def tanimoto_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     """Tanimoto distance (Jaccard): 1 - sum_i min(x_i, y_i) / sum_i max(x_i, y_i)"""
-    return intersection_distance(x, y, blur=blur, use_keops=use_keops, ranges=ranges)
+    return intersection_distance(x, y, use_keops=use_keops, ranges=ranges)
 
 
 def ruzicka_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -374,7 +344,7 @@ def ruzicka_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
 
 
 # ==============================================================================
-#                        Inner Product Family
+#                             Inner Product Family
 # ==============================================================================
 
 def inner_product_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -441,7 +411,7 @@ def kumar_hassebrook_similarity(x, y, blur=None, use_keops=False, ranges=None, *
 
 def jaccard_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     """Jaccard similarity (distinct from Tanimoto): sum_i (x_i * y_i) / (sum_i x_i^2 + sum_i y_i^2 - sum_i (x_i * y_i))"""
-    return kumar_hassebrook_similarity(x, y, blur=blur, use_keops=use_keops, ranges=ranges)
+    return kumar_hassebrook_similarity(x, y, use_keops=use_keops, ranges=ranges)
 
 
 def dice_coefficient(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -464,7 +434,7 @@ def dice_coefficient(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
 
 
 # ==============================================================================
-#                        Squared-chord Family
+#                             Squared-chord Family
 # ==============================================================================
 
 def fidelity_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -475,7 +445,7 @@ def fidelity_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     else:
         S = torch.sum(torch.sqrt(torch.clamp_min(x.unsqueeze(-2) * y.unsqueeze(-3), 0)), dim=-1)
     
-    return -(1 - S)  # Return as distance
+    return 1 - S
 
 
 def bhattacharyya_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -488,7 +458,7 @@ def bhattacharyya_distance(x, y, blur=None, use_keops=False, ranges=None, **kwar
         S = torch.sum(torch.sqrt(torch.clamp_min(x.unsqueeze(-2) * y.unsqueeze(-3), 0)), dim=-1)
         D = -_safe_log(S)
     
-    return -D
+    return D
 
 
 def hellinger_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -501,7 +471,7 @@ def hellinger_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
         S = torch.sum(torch.sqrt(torch.clamp_min(x.unsqueeze(-2) * y.unsqueeze(-3), 0)), dim=-1)
         D = torch.sqrt(torch.clamp_min(2 * (1 - S), 0))
     
-    return -D
+    return D
 
 
 def squared_chord_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -514,11 +484,11 @@ def squared_chord_distance(x, y, blur=None, use_keops=False, ranges=None, **kwar
         sqrt_y = torch.sqrt(torch.clamp_min(y.unsqueeze(-3), 0))
         D = torch.sum((sqrt_x - sqrt_y) ** 2, dim=-1)
     
-    return -D
+    return D
 
 
 # ==============================================================================
-#                        Squared L2 (χ²) Family
+#                           Squared L2 (χ²) Family
 # ==============================================================================
 
 def pearson_chi2_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -530,7 +500,7 @@ def pearson_chi2_distance(x, y, blur=None, use_keops=False, ranges=None, **kwarg
         numerator = (x.unsqueeze(-2) - y.unsqueeze(-3)) ** 2
         D = torch.sum(_safe_div(numerator, y.unsqueeze(-3)), dim=-1)
     
-    return -D
+    return D
 
 
 def neyman_chi2_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -542,15 +512,13 @@ def neyman_chi2_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs
         numerator = (x.unsqueeze(-2) - y.unsqueeze(-3)) ** 2
         D = torch.sum(_safe_div(numerator, x.unsqueeze(-2)), dim=-1)
     
-    return -D
+    return D
 
 
 def squared_l2_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     """Squared L2 distance (Squared Euclidean): sum_i (x_i - y_i)^2"""
     D = _squared_distances(x, y, use_keops=use_keops)
-    if blur is not None:
-        D = D / (blur ** 2)
-    return -D
+    return D
 
 
 def probabilistic_symmetric_chi2_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -565,7 +533,7 @@ def probabilistic_symmetric_chi2_distance(x, y, blur=None, use_keops=False, rang
         denominator = x.unsqueeze(-2) + y.unsqueeze(-3)
         D = torch.sum(_safe_div(numerator, denominator), dim=-1)
     
-    return -D
+    return D
 
 
 def divergence_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -580,7 +548,7 @@ def divergence_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs)
         denominator = (x.unsqueeze(-2) + y.unsqueeze(-3)) ** 2
         D = torch.sum(_safe_div(numerator, denominator), dim=-1)
     
-    return -D
+    return D
 
 
 def clark_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -595,7 +563,7 @@ def clark_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
         sum_val = x.unsqueeze(-2) + y.unsqueeze(-3)
         D = torch.sqrt(torch.sum((_safe_div(diff, sum_val)) ** 2, dim=-1))
     
-    return -D
+    return D
 
 
 def additive_symmetric_chi2_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -610,11 +578,11 @@ def additive_symmetric_chi2_distance(x, y, blur=None, use_keops=False, ranges=No
         denominator = x.unsqueeze(-2) * y.unsqueeze(-3)
         D = torch.sum(_safe_div(numerator, denominator), dim=-1)
     
-    return -D
+    return D
 
 
 # ==============================================================================
-#                        Shannon's Entropy Family
+#                          Shannon's Entropy Family
 # ==============================================================================
 
 def kullback_leibler_divergence(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -626,7 +594,7 @@ def kullback_leibler_divergence(x, y, blur=None, use_keops=False, ranges=None, *
         ratio = _safe_div(x.unsqueeze(-2), y.unsqueeze(-3))
         D = torch.sum(x.unsqueeze(-2) * _safe_log(ratio), dim=-1)
     
-    return -D
+    return D
 
 
 def jeffreys_divergence(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -639,7 +607,7 @@ def jeffreys_divergence(x, y, blur=None, use_keops=False, ranges=None, **kwargs)
         ratio = _safe_div(x.unsqueeze(-2), y.unsqueeze(-3))
         D = torch.sum(diff * _safe_log(ratio), dim=-1)
     
-    return -D
+    return D
 
 
 def k_divergence(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -652,7 +620,7 @@ def k_divergence(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
         denominator = x.unsqueeze(-2) + y.unsqueeze(-3)
         D = torch.sum(x.unsqueeze(-2) * _safe_log(_safe_div(numerator, denominator)), dim=-1)
     
-    return -D
+    return D
 
 
 def topsoe_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -668,12 +636,12 @@ def topsoe_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
         term2 = y.unsqueeze(-3) * _safe_log(_safe_div(2 * y.unsqueeze(-3), sum_xy))
         D = torch.sum(term1 + term2, dim=-1)
     
-    return -D
+    return D
 
 
 def jensen_shannon_divergence(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     """Jensen-Shannon (JS) Divergence: 0.5 * (sum_i x_i * log(2*x_i / (x_i + y_i)) + sum_i y_i * log(2*y_i / (x_i + y_i)))"""
-    D = topsoe_distance(x, y, blur=blur, use_keops=use_keops, ranges=ranges)
+    D = topsoe_distance(x, y, use_keops=use_keops, ranges=ranges)
     return 0.5 * D
 
 
@@ -694,11 +662,11 @@ def jensen_difference(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
         term2 = avg_xy * _safe_log(avg_xy)
         D = torch.sum(term1 - term2, dim=-1)
     
-    return -D
+    return D
 
 
 # ==============================================================================
-#                        Combination Family
+#                             Combination Family
 # ==============================================================================
 
 def taneja_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -715,7 +683,7 @@ def taneja_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
         geom_mean = torch.sqrt(torch.clamp_min(x.unsqueeze(-2) * y.unsqueeze(-3), 0))
         D = torch.sum(avg_xy * _safe_log(_safe_div(sum_xy, 2 * geom_mean)), dim=-1)
     
-    return -D
+    return D
 
 
 def kumar_johnson_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
@@ -730,22 +698,21 @@ def kumar_johnson_distance(x, y, blur=None, use_keops=False, ranges=None, **kwar
         denominator = 2 * (torch.clamp_min(x.unsqueeze(-2) * y.unsqueeze(-3), 0) ** 1.5)
         D = torch.sum(_safe_div(numerator, denominator), dim=-1)
     
-    return -D
+    return D
 
 
 def avg_l1_linf_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     """Avg (L1, L∞) distance: (L1 + L∞) / 2"""
-    l1 = -manhattan_distance(x, y, blur=None, use_keops=use_keops, ranges=ranges)
-    linf = -chebyshev_distance(x, y, blur=None, use_keops=use_keops, ranges=ranges)
+    # Note: These functions now return positive distances
+    l1 = manhattan_distance(x, y, use_keops=use_keops, ranges=ranges)
+    linf = chebyshev_distance(x, y, use_keops=use_keops, ranges=ranges)
     D = (l1 + linf) / 2
     
-    if blur is not None:
-        D = D / blur
-    return -D
+    return D
 
 
 # ==============================================================================
-#                        Distance Metrics Registry
+#                       Distance Metrics Registry
 # ==============================================================================
 
 DISTANCE_METRICS = {

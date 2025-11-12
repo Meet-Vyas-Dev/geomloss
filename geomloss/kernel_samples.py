@@ -9,14 +9,8 @@
           + \\tfrac{1}{2} \sum_{i=1}^M \sum_{j=1}^M  \\beta_i \\beta_j \cdot k(y_i,y_j) \\\\
         &-~\sum_{i=1}^N \sum_{j=1}^M  \\alpha_i \\beta_j \cdot k(x_i,y_j)
 
-where:
-
-.. math::
-    k(x,y)~=~\\begin{cases}
-        \exp( -\|x-y\|^2/2\sigma^2) & \\text{if loss = ``gaussian''} \\\\
-        \exp( -\|x-y\|/\sigma) & \\text{if loss = ``laplacian''} \\\\
-        -\|x-y\| & \\text{if loss = ``energy''} \\\\
-    \\end{cases}
+where k(x,y) is a similarity kernel. For distance metrics D(x,y),
+this module implements the 'Laplacian' kernel k(x,y) = exp(-D(x,y) / blur).
 """
 
 import numpy as np
@@ -40,6 +34,39 @@ except:
 from .utils import scal, squared_distances, distances
 from .distance_metrics import DISTANCE_METRICS, get_distance_metric
 
+# --- NEW: Define metric types ---
+_METRICS_AS_DISTANCE = {
+    # Lp Family
+    "minkowski", "manhattan", "cityblock", "l1", "taxicab", "euclidean", "l2",
+    "chebyshev", "linf", "supremum", "max", "weighted_minkowski",
+    "weighted_cityblock", "weighted_euclidean", "weighted_chebyshev",
+    # L1 Family
+    "sorensen", "dice", "czekanowski", "gower", "soergel", "kulczynski_d1",
+    "canberra", "lorentzian",
+    # Intersection Family (Distances)
+    "intersection", "wave_hedges", "tanimoto", "jaccard_distance",
+    # Squared-chord Family
+    "fidelity", "bhattacharyya", "hellinger", "matusita", "squared_chord",
+    # Squared L2 (χ²) Family
+    "pearson_chi2", "neyman_chi2", "squared_l2", "squared_euclidean",
+    "probabilistic_symmetric_chi2", "divergence", "clark",
+    "additive_symmetric_chi2",
+    # Shannon's Entropy Family
+    "kl", "kullback_leibler", "jeffreys", "j_divergence", "k_divergence",
+    "topsoe", "js", "jensen_shannon", "jensen_difference",
+    # Combination Family
+    "taneja", "kumar_johnson", "avg_l1_linf",
+}
+
+_METRICS_AS_SIMILARITY = {
+    # Intersection Family (Similarities)
+    "czekanowski_similarity", "motyka", "kulczynski_s1", "ruzicka",
+    # Inner Product Family
+    "inner_product", "harmonic_mean", "cosine", "kumar_hassebrook",
+    "pce", "jaccard", "dice_coefficient",
+}
+# --- End of new lists ---
+
 
 class DoubleGrad(torch.autograd.Function):
     @staticmethod
@@ -56,7 +83,7 @@ def double_grad(x):
 
 
 # ==============================================================================
-#                               All backends
+#                             All backends
 # ==============================================================================
 
 
@@ -80,14 +107,44 @@ def laplacian_kernel(x, y, blur=0.05, use_keops=False, ranges=None):
 
 def energy_kernel(x, y, blur=None, use_keops=False, ranges=None):
     # N.B.: We never truncate the energy distance kernel
+    # Energy kernel is -D, not exp(-D/blur).
     return -distances(x, y, use_keops=use_keops)
 
 
+# --- REPLACED function ---
 def distance_metric_kernel(x, y, metric_name, blur=0.05, use_keops=False, ranges=None, **kwargs):
-    """Generic kernel for distance metrics from distance_metrics module."""
+    """
+    Generic kernel for distance metrics from distance_metrics module.
+    Applies the exp(-D/blur) conversion for distance metrics.
+    Returns raw similarity scores for similarity metrics.
+    """
     metric_func = get_distance_metric(metric_name)
-    K = metric_func(x, y, blur=blur, use_keops=use_keops, ranges=ranges, **kwargs)
+    
+    # We pass 'use_keops', 'ranges', and '**kwargs' but NOT 'blur'
+    # 'blur' is handled *after* by this wrapper.
+    raw_metric = metric_func(x, y, use_keops=use_keops, ranges=ranges, **kwargs)
+
+    if metric_name in _METRICS_AS_DISTANCE:
+        # We got a distance D. Apply the Laplacian-style kernel conversion.
+        # This matches the 'laplacian_kernel' convention: exp(-D/blur)
+        if blur is None:
+            blur = 1.0  # Use blur=1 as a default if not provided
+        
+        K = (-raw_metric / blur).exp()
+
+    elif metric_name in _METRICS_AS_SIMILARITY:
+        # We got a similarity S. Use it directly as the kernel.
+        # Note: 'blur' is ignored for pure similarity metrics.
+        K = raw_metric
+    
+    else:
+        # Fallback/Error: This should not happen if lists are correct
+        raise ValueError(f"Metric '{metric_name}' not categorized as distance or similarity.")
+
+    if use_keops and ranges is not None:
+        K.ranges = ranges
     return K
+# --- End of replaced function ---
 
 
 kernel_routines = {
@@ -105,6 +162,7 @@ for metric_name in DISTANCE_METRICS.keys():
     )
 
 
+# --- MODIFIED function ---
 def kernel_loss(
     α,
     x,
@@ -120,25 +178,29 @@ def kernel_loss(
     ranges_xy=None,
     **kwargs
 ):
+    # --- NEW: Add the KeOps Guard ---
+    if use_keops and not keops_available:
+        raise ImportError(
+            "The 'online' backend for kernels requires pykeops. "
+            "Install with: pip install pykeops"
+        )
+    # --- End of guard ---
+    
     if kernel is None:
         kernel = kernel_routines[name]
 
-    # Center the point clouds just in case, to prevent numeric overflows:
-    # N.B.: This may break user-provided kernels and comes at a non-negligible
-    #       cost for small problems, so let's disable this by default.
-    # center = (x.mean(-2, keepdim=True) + y.mean(-2, keepdim=True)) / 2
-    # x, y = x - center, y - center
+    # ... (rest of function is unchanged)
 
     # (B,N,N) tensor
     K_xx = kernel(
-        double_grad(x), x.detach(), blur=blur, use_keops=use_keops, ranges=ranges_xx
+        double_grad(x), x.detach(), blur=blur, use_keops=use_keops, ranges=ranges_xx, **kwargs
     )
     # (B,M,M) tensor
     K_yy = kernel(
-        double_grad(y), y.detach(), blur=blur, use_keops=use_keops, ranges=ranges_yy
+        double_grad(y), y.detach(), blur=blur, use_keops=use_keops, ranges=ranges_yy, **kwargs
     )
     # (B,N,M) tensor
-    K_xy = kernel(x, y, blur=blur, use_keops=use_keops, ranges=ranges_xy)
+    K_xy = kernel(x, y, blur=blur, use_keops=use_keops, ranges=ranges_xy, **kwargs)
 
     # (B,N,N) @ (B,N) = (B,N)
     a_x = (K_xx @ α.detach().unsqueeze(-1)).squeeze(-1)
@@ -160,10 +222,11 @@ def kernel_loss(
             + 0.5 * scal(double_grad(β), b_y, batch=batch)
             - scal(α, b_x, batch=batch)
         )
+# --- End of modified function ---
 
 
 # ==============================================================================
-#                          backend == "tensorized"
+#                       backend == "tensorized"
 # ==============================================================================
 
 from functools import partial
@@ -172,14 +235,14 @@ kernel_tensorized = partial(kernel_loss, use_keops=False)
 
 
 # ==============================================================================
-#                           backend == "online"
+#                       backend == "online"
 # ==============================================================================
 
 kernel_online = partial(kernel_loss, use_keops=True)
 
 
 # ==============================================================================
-#                          backend == "multiscale"
+#                       backend == "multiscale"
 # ==============================================================================
 
 
@@ -284,4 +347,5 @@ def kernel_multiscale(
         ranges_xx=ranges_xx,
         ranges_yy=ranges_yy,
         ranges_xy=ranges_xy,
+        **kwargs
     )

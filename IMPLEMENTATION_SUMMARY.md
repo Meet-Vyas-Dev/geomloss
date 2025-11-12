@@ -199,5 +199,5 @@ Potential improvements:
 
 ## Credits
 
-Extension implemented for the GeomLoss library by Jean Feydy.
+Extension implemented by Meet J. Vyas for the GeomLoss library by Jean Feydy.
 All new metrics follow the same design patterns and conventions as the original library.
