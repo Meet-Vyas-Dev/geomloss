@@ -72,12 +72,36 @@ def _lazy_tensor(x, y, use_keops=False):
 
 def _safe_div(numerator, denominator, eps=1e-8):
     """Safe division avoiding division by zero."""
-    return numerator / (denominator.clamp_min(eps))
+    # Check if denominator is a LazyTensor
+    if keops_available and hasattr(denominator, 'relu') and not isinstance(denominator, torch.Tensor):
+        # LazyTensor case - use element-wise operations
+        return numerator / (denominator + eps)
+    else:
+        # Regular tensor case
+        return numerator / (denominator.clamp_min(eps))
+
+
+def _safe_clamp_min(x, min_val=1e-8):
+    """Safe clamping that works with both Tensors and LazyTensors."""
+    # Check if it's a LazyTensor
+    if keops_available and hasattr(x, 'relu') and not isinstance(x, torch.Tensor):
+        # LazyTensor case - use element-wise addition for clamping
+        return x + min_val
+    else:
+        # Regular tensor case
+        return torch.clamp_min(x, min_val)
+
 
 
 def _safe_log(x, eps=1e-8):
     """Safe logarithm avoiding log(0)."""
-    return torch.log(torch.clamp_min(x, eps))
+    # Check if it's a LazyTensor (has log method)
+    if keops_available and hasattr(x, 'log') and not isinstance(x, torch.Tensor):
+        # LazyTensor case - use element-wise operations
+        return (x + eps).log()
+    else:
+        # Regular tensor case
+        return torch.log(torch.clamp_min(x, eps))
 
 
 # ==============================================================================
@@ -219,8 +243,8 @@ def sorensen_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     """Sørensen distance (Dice/Czekanowski): sum_i |x_i - y_i| / sum_i (x_i + y_i)"""
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
-        numerator = (x_i - y_j).abs().sum(-1)
-        denominator = (x_i + y_j).sum(-1).clamp_min(1e-8)
+        numerator = ((x_i - y_j).abs()).sum(-1)
+        denominator = _safe_clamp_min((x_i + y_j).sum(-1), 1e-8)
         D = numerator / denominator
     else:
         numerator = torch.sum(torch.abs(x.unsqueeze(-2) - y.unsqueeze(-3)), dim=-1)
@@ -247,8 +271,8 @@ def soergel_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     """Soergel distance: sum_i |x_i - y_i| / sum_i max(x_i, y_i)"""
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
-        numerator = (x_i - y_j).abs().sum(-1)
-        denominator = (x_i.max(y_j)).sum(-1).clamp_min(1e-8)
+        numerator = ((x_i - y_j).abs()).sum(-1)
+        denominator = _safe_clamp_min((x_i.max(y_j)).sum(-1), 1e-8)
         D = numerator / denominator
     else:
         numerator = torch.sum(torch.abs(x.unsqueeze(-2) - y.unsqueeze(-3)), dim=-1)
@@ -263,8 +287,8 @@ def kulczynski_d1_distance(x, y, blur=None, use_keops=False, ranges=None, **kwar
     """Kulczynski d1 distance: sum_i |x_i - y_i| / sum_i min(x_i, y_i)"""
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
-        numerator = (x_i - y_j).abs().sum(-1)
-        denominator = (x_i.min(y_j)).sum(-1).clamp_min(1e-8)
+        numerator = ((x_i - y_j).abs()).sum(-1)
+        denominator = _safe_clamp_min((x_i.min(y_j)).sum(-1), 1e-8)
         D = numerator / denominator
     else:
         numerator = torch.sum(torch.abs(x.unsqueeze(-2) - y.unsqueeze(-3)), dim=-1)
@@ -311,7 +335,7 @@ def intersection_distance(x, y, blur=None, use_keops=False, ranges=None, **kwarg
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
         numerator = (x_i.min(y_j)).sum(-1)
-        denominator = (x_i.max(y_j)).sum(-1).clamp_min(1e-8)
+        denominator = _safe_clamp_min((x_i.max(y_j)).sum(-1), 1e-8)
         D = 1 - numerator / denominator
     else:
         numerator = torch.sum(torch.min(x.unsqueeze(-2), y.unsqueeze(-3)), dim=-1)
@@ -343,7 +367,7 @@ def czekanowski_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwar
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
         numerator = 2 * (x_i.min(y_j)).sum(-1)
-        denominator = (x_i + y_j).sum(-1).clamp_min(1e-8)
+        denominator = _safe_clamp_min((x_i + y_j).sum(-1), 1e-8)
         S = numerator / denominator
     else:
         numerator = 2 * torch.sum(torch.min(x.unsqueeze(-2), y.unsqueeze(-3)), dim=-1)
@@ -359,7 +383,7 @@ def motyka_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
         numerator = (x_i.min(y_j)).sum(-1)
-        denominator = (x_i + y_j).sum(-1).clamp_min(1e-8)
+        denominator = _safe_clamp_min((x_i + y_j).sum(-1), 1e-8)
         S = numerator / denominator
     else:
         numerator = torch.sum(torch.min(x.unsqueeze(-2), y.unsqueeze(-3)), dim=-1)
@@ -375,7 +399,7 @@ def kulczynski_s1_similarity(x, y, blur=None, use_keops=False, ranges=None, **kw
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
         numerator = (x_i.min(y_j)).sum(-1)
-        denominator = (x_i - y_j).abs().sum(-1).clamp_min(1e-8)
+        denominator = _safe_clamp_min((x_i - y_j).abs().sum(-1), 1e-8)
         S = numerator / denominator
     else:
         numerator = torch.sum(torch.min(x.unsqueeze(-2), y.unsqueeze(-3)), dim=-1)
@@ -396,7 +420,7 @@ def ruzicka_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
         numerator = (x_i.min(y_j)).sum(-1)
-        denominator = (x_i.max(y_j)).sum(-1).clamp_min(1e-8)
+        denominator = _safe_clamp_min((x_i.max(y_j)).sum(-1), 1e-8)
         S = numerator / denominator
     else:
         numerator = torch.sum(torch.min(x.unsqueeze(-2), y.unsqueeze(-3)), dim=-1)
@@ -426,7 +450,7 @@ def harmonic_mean_similarity(x, y, blur=None, use_keops=False, ranges=None, **kw
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
         numerator = 2 * (x_i * y_j).sum(-1)
-        denominator = (x_i + y_j).sum(-1).clamp_min(1e-8)
+        denominator = _safe_clamp_min((x_i + y_j).sum(-1), 1e-8)
         S = numerator / denominator
     else:
         numerator = 2 * torch.sum(x.unsqueeze(-2) * y.unsqueeze(-3), dim=-1)
@@ -441,8 +465,9 @@ def cosine_similarity(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
         numerator = (x_i * y_j).sum(-1)
-        x_norm = (x_i ** 2).sum(-1).sqrt().clamp_min(1e-8)
-        y_norm = (y_j ** 2).sum(-1).sqrt().clamp_min(1e-8)
+        # PyKeOps compatible clamping using element-wise max
+        x_norm = ((x_i ** 2).sum(-1).sqrt() + 1e-8).relu() + 1e-8
+        y_norm = ((y_j ** 2).sum(-1).sqrt() + 1e-8).relu() + 1e-8
         S = numerator / (x_norm * y_norm)
     else:
         numerator = torch.sum(x.unsqueeze(-2) * y.unsqueeze(-3), dim=-1)
@@ -518,7 +543,8 @@ def bhattacharyya_distance(x, y, blur=None, use_keops=False, ranges=None, **kwar
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
         S = ((x_i * y_j).sqrt()).sum(-1)
-        D = -_safe_log(S)
+        # Use LazyTensor-compatible log
+        D = -(S + 1e-8).log()
     else:
         S = torch.sum(torch.sqrt(torch.clamp_min(x.unsqueeze(-2) * y.unsqueeze(-3), 0)), dim=-1)
         D = -_safe_log(S)
@@ -532,7 +558,8 @@ def hellinger_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
         S = ((x_i * y_j).sqrt()).sum(-1)
-        D = torch.sqrt(torch.clamp_min(2 * (1 - S), 0))
+        # PyKeOps returns standard tensor after reduction, so we can use torch operations
+        D = ((2 * (1 - S)).relu()).sqrt()
     else:
         S = torch.sum(torch.sqrt(torch.clamp_min(x.unsqueeze(-2) * y.unsqueeze(-3), 0)), dim=-1)
         D = torch.sqrt(torch.clamp_min(2 * (1 - S), 0))
@@ -704,7 +731,8 @@ def topsoe_distance(x, y, blur=None, use_keops=False, ranges=None, **kwargs):
     """Topsoe distance: sum_i (x_i * log(2*x_i / (x_i + y_i)) + y_i * log(2*y_i / (x_i + y_i)))"""
     if use_keops and keops_available:
         x_i, y_j = _lazy_tensor(x, y, use_keops=True)
-        sum_xy = (x_i + y_j).clamp_min(1e-8)
+        # PyKeOps compatible clamping using element-wise operations
+        sum_xy = (x_i + y_j) + 1e-8
         D = (x_i * ((2 * x_i + 1e-8) / sum_xy).log() +
              y_j * ((2 * y_j + 1e-8) / sum_xy).log()).sum(-1)
     else:
