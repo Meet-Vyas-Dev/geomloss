@@ -7,9 +7,6 @@ import torch
 from geomloss import SamplesLoss, DISTANCE_METRICS
 import warnings
 
-# Suppress warnings for cleaner output
-warnings.filterwarnings('ignore')
-
 def test_distance_metric(metric_name, device="cpu", dtype=torch.float32):
     """Test a single distance metric."""
     try:

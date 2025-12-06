@@ -68,6 +68,52 @@ _METRICS_AS_SIMILARITY = {
 # --- End of new lists ---
 
 
+# ==============================================================================
+#                   KWARG SANITIZER FOR KERNEL FUNCTIONS
+# ==============================================================================
+
+# Kernels that accept only (x, y, blur, use_keops, ranges) or subsets thereof.
+# We list some common kernel names and the kwargs they accept.
+_ALLOWED_KERNEL_KWARGS = {
+    "gaussian": {"blur", "use_keops", "ranges"},
+    "laplacian": {"blur", "use_keops", "ranges"},
+    "energy": {"use_keops", "ranges"},  # energy_kernel doesn't use blur in practice
+    # distance metric kernels will be sanitized separately
+}
+
+# Distance metrics accept only (use_keops, ranges) + their own internal parameters.
+_ALLOWED_DISTANCE_METRIC_KWARGS = {name: {"use_keops", "ranges"} for name in DISTANCE_METRICS.keys()}
+
+
+def sanitize_kernel_kwargs(name, kwargs):
+    """
+    Remove unsupported keyword arguments before calling any kernel.
+    Prevents errors like: energy_kernel() got unexpected keyword 'p'.
+    """
+    clean = {}
+
+    if name in _ALLOWED_KERNEL_KWARGS:
+        allowed = _ALLOWED_KERNEL_KWARGS[name]
+        for k, v in kwargs.items():
+            if k in allowed:
+                clean[k] = v
+        return clean
+
+    # Otherwise it's likely a distance-metric kernel; do NOT pass 'blur' or other SamplesLoss kwargs
+    if name in _ALLOWED_DISTANCE_METRIC_KWARGS:
+        allowed = _ALLOWED_DISTANCE_METRIC_KWARGS[name]
+        for k, v in kwargs.items():
+            if k in allowed:
+                clean[k] = v
+        return clean
+
+    # Fallback: pass only commonly safe kwargs if present
+    for k in ("use_keops", "ranges"):
+        if k in kwargs:
+            clean[k] = kwargs[k]
+    return clean
+
+
 class DoubleGrad(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input):
@@ -82,7 +128,7 @@ def double_grad(x):
     return DoubleGrad.apply(x)
 
 
-# ==============================================================================
+# ============================================================================== 
 #                             All backends
 # ==============================================================================
 
@@ -119,24 +165,24 @@ def distance_metric_kernel(x, y, metric_name, blur=0.05, use_keops=False, ranges
     Returns raw similarity scores for similarity metrics.
     """
     metric_func = get_distance_metric(metric_name)
-    
-    # We pass 'use_keops', 'ranges', and '**kwargs' but NOT 'blur'
-    # 'blur' is handled *after* by this wrapper.
-    raw_metric = metric_func(x, y, use_keops=use_keops, ranges=ranges, **kwargs)
+
+    # We pass sanitized kwargs to the metric func; metrics expect (use_keops, ranges) and their own params.
+    metric_safe_kwargs = sanitize_kernel_kwargs(metric_name, kwargs)
+    raw_metric = metric_func(x, y, use_keops=use_keops, ranges=ranges, **metric_safe_kwargs)
 
     if metric_name in _METRICS_AS_DISTANCE:
         # We got a distance D. Apply the Laplacian-style kernel conversion.
         # This matches the 'laplacian_kernel' convention: exp(-D/blur)
         if blur is None:
             blur = 1.0  # Use blur=1 as a default if not provided
-        
+
         K = (-raw_metric / blur).exp()
 
     elif metric_name in _METRICS_AS_SIMILARITY:
         # We got a similarity S. Use it directly as the kernel.
         # Note: 'blur' is ignored for pure similarity metrics.
         K = raw_metric
-    
+
     else:
         # Fallback/Error: This should not happen if lists are correct
         raise ValueError(f"Metric '{metric_name}' not categorized as distance or similarity.")
@@ -155,11 +201,15 @@ kernel_routines = {
 
 # Add all distance metrics from distance_metrics module to kernel_routines
 for metric_name in DISTANCE_METRICS.keys():
-    # Create a closure to capture metric_name properly
-    kernel_routines[metric_name] = (
-        lambda x, y, blur=0.05, use_keops=False, ranges=None, _name=metric_name, **kwargs:
-        distance_metric_kernel(x, y, _name, blur=blur, use_keops=use_keops, ranges=ranges, **kwargs)
-    )
+    # Create a closure to capture metric_name properly and sanitize kwargs before calling
+    def _make_closure(_name):
+        return lambda x, y, blur=0.05, use_keops=False, ranges=None, **kwargs: \
+            distance_metric_kernel(
+                x, y, _name,
+                blur=blur, use_keops=use_keops, ranges=ranges,
+                **sanitize_kernel_kwargs(_name, kwargs)
+            )
+    kernel_routines[metric_name] = _make_closure(metric_name)
 
 
 # --- MODIFIED function ---
@@ -185,22 +235,35 @@ def kernel_loss(
             "Install with: pip install pykeops"
         )
     # --- End of guard ---
-    
+
     if kernel is None:
+        if name is None:
+            raise ValueError("Either 'kernel' or 'name' must be provided.")
         kernel = kernel_routines[name]
+
+    # Determine kernel-name for sanitization (fallback to kernel.__name__ if name is None)
+    kernel_name_for_sanitize = name if name is not None else getattr(kernel, "__name__", "")
+
+    # sanitize kwargs for calls (this removes unsupported SamplesLoss kwargs)
+    safe_kwargs = sanitize_kernel_kwargs(kernel_name_for_sanitize, kwargs)
 
     # ... (rest of function is unchanged)
 
     # (B,N,N) tensor
     K_xx = kernel(
-        double_grad(x), x.detach(), blur=blur, use_keops=use_keops, ranges=ranges_xx, **kwargs
+        double_grad(x), x.detach(),
+        blur=blur, use_keops=use_keops, ranges=ranges_xx, **safe_kwargs
     )
     # (B,M,M) tensor
     K_yy = kernel(
-        double_grad(y), y.detach(), blur=blur, use_keops=use_keops, ranges=ranges_yy, **kwargs
+        double_grad(y), y.detach(),
+        blur=blur, use_keops=use_keops, ranges=ranges_yy, **safe_kwargs
     )
     # (B,N,M) tensor
-    K_xy = kernel(x, y, blur=blur, use_keops=use_keops, ranges=ranges_xy, **kwargs)
+    K_xy = kernel(
+        x, y,
+        blur=blur, use_keops=use_keops, ranges=ranges_xy, **safe_kwargs
+    )
 
     # (B,N,N) @ (B,N) = (B,N)
     a_x = (K_xx @ α.detach().unsqueeze(-1)).squeeze(-1)
